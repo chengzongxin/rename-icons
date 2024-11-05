@@ -8,18 +8,22 @@ import time
 import re
 import sys
 import argparse
-from config import DEEPAI_CONFIG
+from config import DEEPBRICKS_CONFIG
+import base64
 
 class AppIconRenamer:
     def __init__(self):
         """
-        Initialize icon renamer with DeepAI
+        Initialize icon renamer with DeepBricks AI
         """
-        self.API_KEY = DEEPAI_CONFIG['API_KEY']
-        self.API_ENDPOINT = 'https://api.deepai.org/api/text2img'
+        # 从配置文件获取DeepBricks配置
+        self.API_KEY = DEEPBRICKS_CONFIG['API_KEY']
+        self.API_URL = DEEPBRICKS_CONFIG['API_URL']
         
         # Supported image formats
         self.image_extensions = ('.png', '.jpg', '.jpeg')
+        
+        # 移除了AipImageClassify的初始化
 
     def get_image_size(self, image_path):
         """Get image dimensions"""
@@ -39,82 +43,86 @@ class AppIconRenamer:
             return "@3x"
 
     def analyze_icon(self, image_path):
-        """
-        Analyze icon using DeepAI
-        """
+        """使用DeepBricks AI分析图片"""
         try:
             print(f"\n正在分析图片: {os.path.basename(image_path)}")
             
-            # Get image size
+            # 获取图片尺寸
             width, height = self.get_image_size(image_path)
             density = self.guess_density(width, height)
             print(f"图片尺寸: {width}x{height}, 密度: {density}")
             
-            # Prepare the API request
+            # 准备API请求
             headers = {
-                'api-key': self.API_KEY
+                'Authorization': f'Bearer {self.API_KEY}',
+                'Content-Type': 'application/json'
             }
             
-            print("正在调用 DeepAI API...")
+            # 读取图片并转换为base64
+            with open(image_path, 'rb') as fp:
+                image_data = base64.b64encode(fp.read()).decode('utf-8')
             
-            # Send image for analysis
-            with open(image_path, 'rb') as file:
-                response = requests.post(
-                    self.API_ENDPOINT,
-                    files={'image': file},
-                    headers=headers
-                )
+            # 准备请求数据
+            data = {
+                "model": "gpt-4o",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "请分析这个图标的内容，用简短的英文关键词描述它的主要特征。然后给这个关键词添加密度标识，比如@2x，@3x等。如果原始图标是@2x，那么返回的结果应该是关键词@2x。"
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{image_data}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 100
+            }
             
-            if response.status_code == 200:
-                result = response.json()
-                print("API 返回结果:")
-                print(result)
-                
-                name_parts = []
-                
-                # 从不同字段获取信息
-                if 'output' in result:
-                    output = result['output']
-                    
-                    # 尝试从主要描述中获取信息
-                    if 'general_description' in output:
-                        main_desc = output['general_description']
-                        print(f"\n主要描述: {main_desc}")
-                        cleaned_desc = self._clean_name(main_desc)
-                        if cleaned_desc:
-                            name_parts.append(cleaned_desc)
-                    
-                    # 从标签中获取补充信息
-                    if 'tags' in output:
-                        tags = output['tags']
-                        if tags:
-                            print("\n识别到的标签:")
-                            for i, tag in enumerate(tags[:3], 1):
-                                print(f"{i}. {tag}")
-                            
-                            # 使用最相关的标签
-                            if tags[0] not in main_desc:
-                                cleaned_tag = self._clean_name(tags[0])
-                                if cleaned_tag and cleaned_tag not in name_parts:
-                                    print(f"添加补充标签: {cleaned_tag}")
-                                    name_parts.append(cleaned_tag)
-                
-                if name_parts:
-                    # Combine parts
-                    final_name = '_'.join(name_parts[:2])  # 限制为两个部分
-                    print(f"\n最终文件名: ic_{final_name}{density}")
-                    return f"ic_{final_name}", density
-                
-                return "ic_unknown", density
+            # 调用DeepBricks API
+            print("\n正在调用DeepBricks AI API...")
+            response = requests.post(
+                self.API_URL,
+                headers=headers,
+                json=data
+            )
             
+            result = response.json()
+            print("\n=== API 返回结果详情 ===")
+            print(f"原始返回: {result}")
+            
+            # 正确解析JSON结构
+            if 'choices' in result and len(result['choices']) > 0:
+                # 获取message中的content
+                content = result['choices'][0]['message']['content']
+                print(f"\n识别结果: {content}")
+                
+                # 直接使用content作为关键词（因为已经要求AI返回简短的关键词）
+                cleaned_keyword = self._clean_name(content)
+                
+                if cleaned_keyword:
+                    # 如果有密度标识，添加到文件名
+                    final_name = f"{cleaned_keyword}{density}"
+                    print(f"\n最终生成的名称: {final_name}")
+                    return final_name
+                else:
+                    return 'unknown'
             else:
-                print(f"API 调用失败: {response.status_code}")
-                print(response.text)
-                return "ic_unknown", density
+                print("\n警告: 无法从API返回结果中提取内容")
+                if 'error' in result:
+                    print(f"错误信息: {result['error']}")
+                return 'unknown'
                 
         except Exception as e:
-            print(f"分析图片时发生错误: {str(e)}")
-            return "ic_unknown", ""
+            print(f"\n分析图片时发生错误: {str(e)}")
+            print(f"错误类型: {type(e).__name__}")
+            return 'unknown'
 
     def _clean_name(self, text):
         """
@@ -168,7 +176,7 @@ class AppIconRenamer:
                 old_path = os.path.join(folder_path, filename)
                 
                 # Analyze icon
-                icon_prefix, density = self.analyze_icon(old_path)
+                icon_prefix = self.analyze_icon(old_path)
                 
                 # Handle duplicate names
                 if icon_prefix in name_counters:
@@ -179,7 +187,7 @@ class AppIconRenamer:
                     name_counters[icon_prefix] = 0
                 
                 # Build new filename
-                new_filename = f"{icon_prefix}{density}{file_ext}"
+                new_filename = f"{icon_prefix}{file_ext}"
                 new_path = os.path.join(folder_path, new_filename)
                 
                 print(f"\n计划重命名:")
@@ -208,7 +216,7 @@ class AppIconRenamer:
                     os.rename(old_path, new_path)
                     print(f"成功重命名: {old_name} -> {new_name}")
                 except Exception as e:
-                    print(f"重命名 {old_name} 时发生错误: {str(e)}")
+                    print(f"重命名 {old_name} 时发���错误: {str(e)}")
             
             print("\n重命名操作完成！")
         else:
